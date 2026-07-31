@@ -34,6 +34,7 @@ export default defineConfig({
     reuseExistingServer: false,
     timeout: 120_000,
     env: {
+      NEXT_DIST_DIR: ".next-e2e",
       DATABASE_PATH: "./data/e2e-bookmarks.db",
       ALLOW_TEST_LOOPBACK: "1",
       FETCH_TIMEOUT_MS: "5000",

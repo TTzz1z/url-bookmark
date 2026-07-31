@@ -7,9 +7,14 @@ export default defineConfig([
   ...nextTypeScript,
   globalIgnores([
     ".next/**",
+    ".next-portable/**",
+    ".next-e2e/**",
+    "release/**",
+    ".release/**",
     "coverage/**",
     "playwright-report/**",
     "test-results/**",
-    "next-env.d.ts"
-  ])
+    "vendor/**",
+    "next-env.d.ts",
+  ]),
 ]);
