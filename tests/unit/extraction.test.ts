@@ -71,6 +71,21 @@ describe("正文提取与 Markdown", () => {
     expect(result.markdownContent).toContain("| success");
   });
 
+  it("把交互式热力图 aria-label 数值写回 Markdown 表格", () => {
+    const result = extractFromHtml(
+      `<!doctype html><html><head><title>Work matrix</title></head><body><article>
+       <h1>Occupation vs work</h1>
+       <p>${"This report compares how different departments use coding and knowledge work. ".repeat(10)}</p>
+       <table><thead><tr><th>Department</th><th>Coding</th></tr></thead>
+       <tbody><tr><th>Engineering</th><td><span aria-label="72% share"><span aria-hidden="true">72%</span></span></td></tr></tbody></table>
+       <p>${"The matrix makes the cross-functional distribution easier to compare. ".repeat(8)}</p>
+       </article></body></html>`,
+      "https://example.com/report",
+    );
+    expect(result.markdownContent).toContain("72%");
+    expect(result.markdownContent).not.toContain("share");
+  });
+
   it("将懒加载图片转换为绝对地址", () => {
     const result = extractFromHtml(
       fixture("article-with-lazy-image.html"),
@@ -181,5 +196,13 @@ describe("paginated article discovery", () => {
       { url: "https://www.example.com/guide/100_2.shtml", pageNumber: 2 },
       { url: "https://www.example.com/guide/100_3.shtml", pageNumber: 3 },
     ]);
+  });
+
+  it("不把数字脚注锚点误判为分页", () => {
+    const pages = discoverPaginationUrls(
+      `<p>正文引用<a href="#citation-bottom-1">1</a>和<a href="#citation-bottom-2">2</a></p>`,
+      "https://example.com/article/",
+    );
+    expect(pages).toEqual([]);
   });
 });

@@ -46,6 +46,7 @@ export const bookmarks = sqliteTable(
       .default(false),
     retryCount: integer("retry_count").notNull().default(0),
     extractedAt: integer("extracted_at", { mode: "timestamp_ms" }),
+    deletedAt: integer("deleted_at", { mode: "timestamp_ms" }),
     createdAt: integer("created_at", { mode: "timestamp_ms" })
       .notNull()
       .$defaultFn(() => new Date()),
@@ -59,6 +60,7 @@ export const bookmarks = sqliteTable(
     index("bookmarks_updated_at_idx").on(table.updatedAt),
     index("bookmarks_status_idx").on(table.extractionStatus),
     index("bookmarks_domain_idx").on(table.domain),
+    index("bookmarks_deleted_at_idx").on(table.deletedAt),
   ],
 );
 

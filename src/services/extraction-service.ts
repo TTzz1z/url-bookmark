@@ -5,6 +5,12 @@ import TurndownService from "turndown";
 import { gfm } from "turndown-plugin-gfm";
 import { AppError, toAppError } from "@/lib/errors";
 import type { ExtractionStatus } from "@/db/schema";
+import {
+  extractEmbeddedCharts,
+  injectEmbeddedChartPlaceholders,
+  stripEmbeddedChartPlaceholders,
+  type GeneratedChartImage,
+} from "./chart-extraction-service";
 import { safeFetchHtml } from "./fetch-service";
 
 export type ExtractionResult = {
@@ -22,6 +28,7 @@ export type ExtractionResult = {
   errorCode?: string;
   errorMessage?: string;
   httpStatusCode?: number;
+  generatedImages?: GeneratedChartImage[];
 };
 
 type Metadata = {
@@ -62,17 +69,40 @@ function sourceFromSrcset(value: string | null): string | null {
   }
   const candidates = value
     .split(",")
-    .map((candidate) => candidate.trim().split(/\s+/, 1)[0])
-    .filter(Boolean);
-  return candidates.at(-1) ?? null;
+    .map((candidate, index) => {
+      const [url, descriptor = ""] = candidate.trim().split(/\s+/, 2);
+      const width = descriptor.match(/^(\d+(?:\.\d+)?)w$/i)?.[1];
+      const density = descriptor.match(/^(\d+(?:\.\d+)?)x$/i)?.[1];
+      return {
+        url,
+        score: width
+          ? Number.parseFloat(width)
+          : density
+            ? Number.parseFloat(density) * 10_000
+            : index,
+      };
+    })
+    .filter((candidate) => Boolean(candidate.url))
+    .sort((left, right) => left.score - right.score);
+  return candidates.at(-1)?.url ?? null;
 }
 
-function absoluteUrl(value: string | null, baseUrl: string): string | undefined {
+function absoluteUrl(
+  value: string | null,
+  baseUrl: string,
+): string | undefined {
   if (!value) {
     return undefined;
   }
+  const decoded = value
+    .trim()
+    .replace(/&amp;/gi, "&")
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">");
   try {
-    const url = new URL(value, baseUrl);
+    const url = new URL(decoded, baseUrl);
     if (url.protocol !== "http:" && url.protocol !== "https:") {
       return undefined;
     }
@@ -114,7 +144,9 @@ function linkedOriginalImage(
   image: HTMLImageElement,
   baseUrl: string,
 ): string | undefined {
-  const anchorHref = image.closest<HTMLAnchorElement>("a[href]")?.getAttribute("href");
+  const anchorHref = image
+    .closest<HTMLAnchorElement>("a[href]")
+    ?.getAttribute("href");
   const safeHref = absoluteUrl(anchorHref ?? null, baseUrl);
   if (!safeHref) {
     return undefined;
@@ -124,7 +156,11 @@ function linkedOriginalImage(
   }
 
   const viewerUrl = new URL(safeHref);
-  if (!/(?:show|view).*(?:image|pic)|(?:image|pic).*(?:show|view)/i.test(viewerUrl.pathname)) {
+  if (
+    !/(?:show|view).*(?:image|pic)|(?:image|pic).*(?:show|view)/i.test(
+      viewerUrl.pathname,
+    )
+  ) {
     return undefined;
   }
   const candidates = [
@@ -167,6 +203,34 @@ function lazyImageSource(
   return undefined;
 }
 
+function pictureImageSource(
+  image: HTMLImageElement,
+  baseUrl: string,
+): string | undefined {
+  const picture = image.closest("picture");
+  if (!picture) {
+    return undefined;
+  }
+  const candidates = Array.from(picture.querySelectorAll("source"))
+    .flatMap((source) => [
+      sourceFromSrcset(source.getAttribute("data-srcset")),
+      sourceFromSrcset(source.getAttribute("srcset")),
+    ])
+    .filter((value): value is string => Boolean(value));
+  return absoluteUrl(candidates.at(-1) ?? null, baseUrl);
+}
+
+function backgroundImageSource(
+  element: HTMLElement,
+  baseUrl: string,
+): string | undefined {
+  const style = element.getAttribute("style") ?? "";
+  const match = style.match(
+    /background(?:-image)?\s*:[^;]*url\(\s*(["']?)(.*?)\1\s*\)/i,
+  );
+  return absoluteUrl(match?.[2] ?? null, baseUrl);
+}
+
 function stripPaginationMarker(pathname: string): string {
   return pathname
     .replace(/_(\d+)(?=\.[^./]+$)/i, "")
@@ -190,10 +254,7 @@ function paginationSeriesKey(value: string): string | null {
   }
 }
 
-function paginationPageNumber(
-  value: string,
-  linkText = "",
-): number | null {
+function paginationPageNumber(value: string, linkText = ""): number | null {
   const numericText = linkText.trim().match(/^\d{1,3}$/)?.[0];
   if (numericText) {
     return Number.parseInt(numericText, 10);
@@ -225,7 +286,10 @@ function paginationPageNumber(
   return null;
 }
 
-function isSamePaginationSeries(firstUrl: string, candidateUrl: string): boolean {
+function isSamePaginationSeries(
+  firstUrl: string,
+  candidateUrl: string,
+): boolean {
   return (
     paginationSeriesKey(firstUrl) !== null &&
     paginationSeriesKey(firstUrl) === paginationSeriesKey(candidateUrl)
@@ -257,8 +321,10 @@ export function discoverPaginationUrls(
       continue;
     }
     const candidate = absoluteUrl(anchor.getAttribute("href"), firstUrl);
+    const candidateUrl = candidate ? new URL(candidate) : null;
     if (
       !candidate ||
+      candidateUrl?.hash ||
       candidate === firstNormalized ||
       !isSamePaginationSeries(firstUrl, candidate)
     ) {
@@ -280,13 +346,13 @@ export function discoverPaginationUrls(
 }
 
 function metaContent(document: Document, selector: string): string | undefined {
-  return document.querySelector(selector)?.getAttribute("content")?.trim() || undefined;
+  return (
+    document.querySelector(selector)?.getAttribute("content")?.trim() ||
+    undefined
+  );
 }
 
-export function extractMetadata(
-  document: Document,
-  baseUrl: string,
-): Metadata {
+export function extractMetadata(document: Document, baseUrl: string): Metadata {
   const title =
     metaContent(document, 'meta[property="og:title"]') ??
     metaContent(document, 'meta[name="twitter:title"]') ??
@@ -327,6 +393,39 @@ export function prepareDocument(document: Document, baseUrl: string): void {
     }
   }
 
+  for (const element of document.querySelectorAll<HTMLElement>(
+    '[role="img"][style*="background"], figure[style*="background"]',
+  )) {
+    const source = backgroundImageSource(element, baseUrl);
+    if (!source || element.querySelector("img")) {
+      continue;
+    }
+    const image = document.createElement("img");
+    image.setAttribute("src", source);
+    image.setAttribute(
+      "alt",
+      element.getAttribute("aria-label")?.trim() ||
+        element.getAttribute("title")?.trim() ||
+        "文章背景图片",
+    );
+    element.append(image);
+  }
+
+  // 交互式热力图常把数值放在 aria-label 中，视觉圆点本身会在正文清洗时
+  // 被移除。先把可访问名称写回单元格，保证 Markdown 表格仍保留数据。
+  for (const cell of document.querySelectorAll<HTMLTableCellElement>(
+    "td, th",
+  )) {
+    const label = cell
+      .querySelector<HTMLElement>("[aria-label]")
+      ?.getAttribute("aria-label")
+      ?.replace(/\s+share$/i, "")
+      .trim();
+    if (label && /\d|%/.test(label)) {
+      cell.textContent = label;
+    }
+  }
+
   for (const [index, image] of Array.from(
     document.querySelectorAll<HTMLImageElement>("img"),
   ).entries()) {
@@ -337,12 +436,14 @@ export function prepareDocument(document: Document, baseUrl: string): void {
         sourceFromSrcset(image.getAttribute("srcset")),
       baseUrl,
     );
+    const pictureSource = pictureImageSource(image, baseUrl);
     const safeSource =
       linkedOriginalImage(image, baseUrl) ??
       (looksLikePlaceholderImage(currentSource)
-        ? lazySource ?? responsiveSource
+        ? (lazySource ?? pictureSource ?? responsiveSource)
         : currentSource) ??
       lazySource ??
+      pictureSource ??
       responsiveSource;
     if (safeSource) {
       image.setAttribute("src", safeSource);
@@ -361,7 +462,9 @@ export function prepareDocument(document: Document, baseUrl: string): void {
     image.removeAttribute("data-srcset");
   }
 
-  for (const anchor of document.querySelectorAll<HTMLAnchorElement>("a[href]")) {
+  for (const anchor of document.querySelectorAll<HTMLAnchorElement>(
+    "a[href]",
+  )) {
     const safeHref = absoluteUrl(anchor.getAttribute("href"), baseUrl);
     if (safeHref) {
       anchor.setAttribute("href", safeHref);
@@ -382,13 +485,14 @@ function configureTurndown(): TurndownService {
   turndown.use(gfm);
   turndown.addRule("fencedCodeWithLanguage", {
     filter: (node) =>
-      node.nodeName === "PRE" &&
-      node.firstElementChild?.nodeName === "CODE",
+      node.nodeName === "PRE" && node.firstElementChild?.nodeName === "CODE",
     replacement: (_content, node) => {
       const code = node.firstElementChild;
       const language =
         node.getAttribute("data-code-language") ??
-        code?.getAttribute("class")?.match(/(?:language-|lang-)([\w-]+)/)?.[1] ??
+        code
+          ?.getAttribute("class")
+          ?.match(/(?:language-|lang-)([\w-]+)/)?.[1] ??
         "";
       const text = code?.textContent?.replace(/\n$/, "") ?? "";
       return `\n\n\`\`\`${language}\n${text}\n\`\`\`\n\n`;
@@ -433,23 +537,21 @@ export function evaluateContent(
     return { valid: false, code: "JS_REQUIRED" };
   }
   const chineseCharacters = (normalized.match(/[\u3400-\u9fff]/g) ?? []).length;
-  const englishWords = (
-    normalized.match(/[A-Za-z]+(?:['’-][A-Za-z]+)*/g) ?? []
-  ).length;
+  const englishWords = (normalized.match(/[A-Za-z]+(?:['’-][A-Za-z]+)*/g) ?? [])
+    .length;
   const paragraphs = document.querySelectorAll("p").length;
   const valid =
     chineseCharacters >= 100 ||
     englishWords >= 80 ||
     (paragraphs >= 3 && normalized.length >= 240);
-  return valid
-    ? { valid: true }
-    : { valid: false, code: "CONTENT_TOO_SHORT" };
+  return valid ? { valid: true } : { valid: false, code: "CONTENT_TOO_SHORT" };
 }
 
 export function extractFromHtml(
   html: string,
   finalUrl: string,
   httpStatusCode = 200,
+  generatedImages: GeneratedChartImage[] = [],
 ): ExtractionResult {
   const domain = new URL(finalUrl).hostname;
   const fallbackTitle = domain || finalUrl;
@@ -464,6 +566,7 @@ export function extractFromHtml(
   }
 
   const document = dom.window.document;
+  injectEmbeddedChartPlaceholders(document, generatedImages);
   const metadata = extractMetadata(document, finalUrl);
   prepareDocument(document, finalUrl);
   const titleBeforeReadability = metadata.title ?? fallbackTitle;
@@ -475,7 +578,10 @@ export function extractFromHtml(
     article = null;
   }
   if (!article?.content) {
-    const plainFallback = document.body?.textContent?.replace(/\s+/g, " ").trim() ?? "";
+    const plainFallback = stripEmbeddedChartPlaceholders(
+      document.body?.textContent ?? "",
+      generatedImages,
+    );
     const quality = evaluateContent(plainFallback, document);
     const fallbackPurifier = createDOMPurify(
       dom.window as unknown as Window & typeof globalThis,
@@ -550,16 +656,15 @@ export function extractFromHtml(
     FORBID_ATTR: ["style", "srcset"],
     ALLOW_UNKNOWN_PROTOCOLS: false,
   }) as string;
-  const cleanDom = new JSDOM(`<article>${sanitized}</article>`, { url: finalUrl });
+  const cleanDom = new JSDOM(`<article>${sanitized}</article>`, {
+    url: finalUrl,
+  });
   prepareDocument(cleanDom.window.document, finalUrl);
   const articleElement = cleanDom.window.document.querySelector("article");
-  const plainText = (
-    article.textContent ??
-    articleElement?.textContent ??
-    ""
-  )
-    .replace(/\s+/g, " ")
-    .trim();
+  const plainText = stripEmbeddedChartPlaceholders(
+    article.textContent ?? articleElement?.textContent ?? "",
+    generatedImages,
+  );
   const quality = evaluateContent(plainText, cleanDom.window.document);
   const markdownBody = normalizeMarkdown(
     configureTurndown().turndown(articleElement?.innerHTML ?? sanitized),
@@ -667,29 +772,41 @@ function mergePaginatedResults(
 export async function extractUrl(rawUrl: string): Promise<ExtractionResult> {
   try {
     const firstFetched = await safeFetchHtml(rawUrl);
+    const generatedImages = await extractEmbeddedCharts(firstFetched.html);
     const firstResult = extractFromHtml(
       firstFetched.html,
       firstFetched.finalUrl,
       firstFetched.statusCode,
+      generatedImages,
     );
+    const withCover =
+      firstResult.coverImageUrl &&
+      !/!\[[^\]]*]\(https?:\/\//i.test(firstResult.markdownContent)
+        ? {
+            ...firstResult,
+            markdownContent:
+              `![${firstResult.title.replace(/[\[\]]/g, "")}](${firstResult.coverImageUrl})\n\n${firstResult.markdownContent}`.trim(),
+            contentLength: 0,
+          }
+        : firstResult;
+    withCover.contentLength = withCover.markdownContent.length;
+    withCover.generatedImages = generatedImages;
+
     const pending = discoverPaginationUrls(
       firstFetched.html,
       firstFetched.finalUrl,
     );
     if (pending.length === 0) {
-      return firstResult;
+      return withCover;
     }
 
     const pages: ExtractedPaginationPage[] = [
-      { url: firstFetched.finalUrl, pageNumber: 1, result: firstResult },
+      { url: firstFetched.finalUrl, pageNumber: 1, result: withCover },
     ];
     const visited = new Set([new URL(firstFetched.finalUrl).toString()]);
     let failedPages = 0;
 
-    while (
-      pending.length > 0 &&
-      pages.length < MAX_PAGINATED_PAGES
-    ) {
+    while (pending.length > 0 && pages.length < MAX_PAGINATED_PAGES) {
       const page = pending.shift();
       if (!page || visited.has(page.url)) {
         continue;
@@ -724,11 +841,16 @@ export async function extractUrl(rawUrl: string): Promise<ExtractionResult> {
       }
     }
 
-    return mergePaginatedResults(
+    const merged = mergePaginatedResults(
       pages,
       firstFetched.finalUrl,
       failedPages,
     );
+    return {
+      ...merged,
+      coverImageUrl: withCover.coverImageUrl ?? merged.coverImageUrl,
+      generatedImages,
+    };
   } catch (error) {
     const appError = toAppError(error);
     let finalUrl = rawUrl;

@@ -38,6 +38,9 @@ export async function GET(request: Request, context: RouteContext) {
       `title: ${yamlValue(bookmark.title)}`,
       `source: ${yamlValue(bookmark.url)}`,
       `domain: ${yamlValue(bookmark.domain)}`,
+      ...(bookmark.coverImageUrl
+        ? [`cover_image: ${yamlValue(bookmark.coverImageUrl)}`]
+        : []),
       `saved_at: ${yamlValue(bookmark.createdAt.toISOString())}`,
       "tags:",
       ...bookmark.tags.map((tag) => `  - ${yamlValue(tag.name)}`),

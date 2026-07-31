@@ -10,14 +10,20 @@ import {
   getDatabase,
 } from "@/db/client";
 import {
-  deleteBookmark,
+  deleteTag,
   getBookmarkById,
+  getOrCreateTag,
+  hardDeleteBookmark,
   insertBookmark,
   listBookmarks,
+  listDeletedBookmarkIdsBefore,
   listTags,
   normalizeTagName,
+  restoreBookmark,
   setBookmarkTags,
+  softDeleteBookmark,
   updateBookmarkRecord,
+  updateTag,
 } from "@/db/repository";
 
 describe("SQLite Repository 与持久化", () => {
@@ -122,6 +128,84 @@ describe("SQLite Repository 与持久化", () => {
     expect(result.items[0].id).toBe(firstId);
   });
 
+  it("超过 50 条时可通过后续分页访问", async () => {
+    const createdAt = Date.now() + 10_000;
+    for (let index = 0; index < 55; index += 1) {
+      insertBookmark({
+        id: randomUUID(),
+        url: `https://pagination.example.com/article-${index}`,
+        normalizedUrl: `https://pagination.example.com/article-${index}`,
+        finalUrl: `https://pagination.example.com/article-${index}`,
+        title: `分页样本 ${String(index).padStart(2, "0")}`,
+        domain: "pagination.example.com",
+        plainText: "用于验证加载更多的分页样本",
+        extractionStatus: "success",
+        createdAt: new Date(createdAt + index),
+        updatedAt: new Date(createdAt + index),
+      });
+    }
+
+    const firstPage = await listBookmarks({
+      q: "分页样本",
+      page: 1,
+      pageSize: 50,
+    });
+    const secondPage = await listBookmarks({
+      q: "分页样本",
+      page: 2,
+      pageSize: 50,
+    });
+
+    expect(firstPage.total).toBe(55);
+    expect(firstPage.items).toHaveLength(50);
+    expect(secondPage.items).toHaveLength(5);
+    expect(
+      new Set([...firstPage.items, ...secondPage.items].map((item) => item.id))
+        .size,
+    ).toBe(55);
+  });
+
+  it("重命名、计数并删除标签", () => {
+    const created = getOrCreateTag("待整理");
+    expect(listTags().find((tag) => tag.id === created.id)?.bookmarkCount).toBe(
+      0,
+    );
+
+    const renamed = updateTag(created.id, "已整理");
+    expect(renamed.name).toBe("已整理");
+    expect(listTags().find((tag) => tag.id === created.id)).toMatchObject({
+      name: "已整理",
+      bookmarkCount: 0,
+    });
+
+    expect(deleteTag(created.id)).toBe(true);
+    expect(listTags().some((tag) => tag.id === created.id)).toBe(false);
+  });
+
+  it("数据库唯一约束冲突映射为 DUPLICATE_URL", () => {
+    let caught: unknown;
+    try {
+      insertBookmark({
+        id: randomUUID(),
+        url: "https://example.com/guide#duplicate",
+        normalizedUrl: "https://example.com/guide",
+        finalUrl: "https://example.com/guide",
+        title: "并发重复收藏",
+        domain: "example.com",
+        extractionStatus: "pending",
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toMatchObject({
+      code: "DUPLICATE_URL",
+      status: 409,
+    });
+  });
+
   it("关闭并重新打开连接后数据仍然存在", async () => {
     closeDatabase();
     expect(fs.existsSync(databasePath)).toBe(true);
@@ -131,9 +215,34 @@ describe("SQLite Repository 与持久化", () => {
     expect(record?.tags).toHaveLength(2);
   });
 
-  it("删除书签时级联删除标签关系", async () => {
-    expect(deleteBookmark(secondId)).toBe(true);
+  it("软删除后书签对查询不可见，但仍可恢复", async () => {
+    expect(softDeleteBookmark(secondId)).toBe(true);
     expect(await getBookmarkById(secondId)).toBeNull();
+    expect(
+      (await getBookmarkById(secondId, { includeDeleted: true }))?.deletedAt,
+    ).toBeInstanceOf(Date);
+    const list = await listBookmarks({});
+    expect(list.items.some((item) => item.id === secondId)).toBe(false);
+    expect(listTags().find((tag) => tag.name === "阅读")?.bookmarkCount).toBe(1);
+
+    expect(restoreBookmark(secondId)).toBe(true);
+    expect((await getBookmarkById(secondId))?.id).toBe(secondId);
+    expect(listTags().find((tag) => tag.name === "阅读")?.bookmarkCount).toBe(2);
+  });
+
+  it("按删除时间筛选出过期记录，硬删除时级联清理标签关系", async () => {
+    expect(softDeleteBookmark(secondId)).toBe(true);
+    expect(listDeletedBookmarkIdsBefore(new Date(Date.now() - 60_000))).toEqual(
+      [],
+    );
+    expect(
+      listDeletedBookmarkIdsBefore(new Date(Date.now() + 60_000)),
+    ).toEqual([secondId]);
+
+    expect(hardDeleteBookmark(secondId)).toBe(true);
+    expect(
+      await getBookmarkById(secondId, { includeDeleted: true }),
+    ).toBeNull();
     expect(listTags().find((tag) => tag.name === "阅读")?.bookmarkCount).toBe(1);
   });
 });

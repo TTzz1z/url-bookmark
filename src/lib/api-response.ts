@@ -3,6 +3,9 @@ import { ZodError } from "zod";
 import { AppError, toAppError } from "./errors";
 
 export function apiErrorResponse(error: unknown): NextResponse {
+  if (!(error instanceof AppError) && !(error instanceof ZodError)) {
+    console.error("Unhandled API error", error);
+  }
   const appError =
     error instanceof ZodError
       ? new AppError("VALIDATION_ERROR", undefined, 400)

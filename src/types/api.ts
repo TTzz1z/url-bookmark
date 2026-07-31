@@ -47,3 +47,10 @@ export type ApiErrorDto = {
     message: string;
   };
 };
+
+export type StorageUsageDto = {
+  databasePath: string;
+  databaseBytes: number;
+  assetBytes: number;
+  totalBytes: number;
+};

@@ -40,7 +40,7 @@ export const errorMessages: Record<AppErrorCode, string> = {
   VALIDATION_ERROR: "提交内容不符合要求",
   NOT_FOUND: "未找到对应记录",
   CONTENT_EDITED: "正文已被手动编辑，重新提取前需要确认覆盖",
-  UNKNOWN_ERROR: "抓取过程中出现未知错误",
+  UNKNOWN_ERROR: "服务暂时不可用，请稍后重试",
 };
 
 export class AppError extends Error {
@@ -69,9 +69,5 @@ export function toAppError(error: unknown): AppError {
   if (error instanceof Error && error.name === "AbortError") {
     return new AppError("REQUEST_TIMEOUT", undefined, 408);
   }
-  return new AppError(
-    "UNKNOWN_ERROR",
-    error instanceof Error ? error.message : errorMessages.UNKNOWN_ERROR,
-    500,
-  );
+  return new AppError("UNKNOWN_ERROR", undefined, 500);
 }

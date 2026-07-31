@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { and, eq, inArray } from "drizzle-orm";
+import { and, eq, inArray, isNotNull, isNull, lt } from "drizzle-orm";
 import { getDatabase } from "./client";
 import {
   bookmarks,
@@ -119,6 +119,7 @@ export async function listBookmarks(
       )
     )
     AND (? = '' OR b.extraction_status = ?)
+    AND b.deleted_at IS NULL
   `;
   const params = [
     q,
@@ -170,12 +171,17 @@ export async function listBookmarks(
 
 export async function getBookmarkById(
   id: string,
+  options: { includeDeleted?: boolean } = {},
 ): Promise<BookmarkWithTags | null> {
   const database = getDatabase();
   const bookmark = database
     .select()
     .from(bookmarks)
-    .where(eq(bookmarks.id, id))
+    .where(
+      options.includeDeleted
+        ? eq(bookmarks.id, id)
+        : and(eq(bookmarks.id, id), isNull(bookmarks.deletedAt)),
+    )
     .get();
   if (!bookmark) {
     return null;
@@ -199,7 +205,25 @@ export function findBookmarkByNormalizedUrl(
 
 export function insertBookmark(values: NewBookmarkRecord): BookmarkRecord {
   const database = getDatabase();
-  return database.insert(bookmarks).values(values).returning().get();
+  try {
+    return database.insert(bookmarks).values(values).returning().get();
+  } catch (error) {
+    const sqliteCode =
+      typeof error === "object" &&
+      error !== null &&
+      "code" in error &&
+      typeof error.code === "string"
+        ? error.code
+        : "";
+    const message = error instanceof Error ? error.message : "";
+    if (
+      sqliteCode.startsWith("SQLITE_CONSTRAINT") &&
+      /bookmarks(?:\.normalized_url|_normalized_url_unique)/.test(message)
+    ) {
+      throw new AppError("DUPLICATE_URL", undefined, 409);
+    }
+    throw error;
+  }
 }
 
 export function updateBookmarkRecord(
@@ -219,10 +243,42 @@ export function updateBookmarkRecord(
   return updated;
 }
 
-export function deleteBookmark(id: string): boolean {
+export function softDeleteBookmark(id: string): boolean {
+  const database = getDatabase();
+  const result = database
+    .update(bookmarks)
+    .set({ deletedAt: new Date() })
+    .where(and(eq(bookmarks.id, id), isNull(bookmarks.deletedAt)))
+    .run();
+  return result.changes > 0;
+}
+
+export function restoreBookmark(id: string): boolean {
+  const database = getDatabase();
+  const result = database
+    .update(bookmarks)
+    .set({ deletedAt: null })
+    .where(and(eq(bookmarks.id, id), isNotNull(bookmarks.deletedAt)))
+    .run();
+  return result.changes > 0;
+}
+
+export function hardDeleteBookmark(id: string): boolean {
   const database = getDatabase();
   const result = database.delete(bookmarks).where(eq(bookmarks.id, id)).run();
   return result.changes > 0;
+}
+
+export function listDeletedBookmarkIdsBefore(threshold: Date): string[] {
+  const database = getDatabase();
+  return database
+    .select({ id: bookmarks.id })
+    .from(bookmarks)
+    .where(
+      and(isNotNull(bookmarks.deletedAt), lt(bookmarks.deletedAt, threshold)),
+    )
+    .all()
+    .map((row) => row.id);
 }
 
 export function getOrCreateTag(rawName: string): TagRecord {
@@ -300,9 +356,10 @@ export function listTags(): TagWithCount[] {
         t.normalized_name AS normalizedName,
         t.created_at AS createdAt,
         t.updated_at AS updatedAt,
-        COUNT(bt.bookmark_id) AS bookmarkCount
+        COUNT(b.id) AS bookmarkCount
       FROM tags t
       LEFT JOIN bookmark_tags bt ON bt.tag_id = t.id
+      LEFT JOIN bookmarks b ON b.id = bt.bookmark_id AND b.deleted_at IS NULL
       GROUP BY t.id
       ORDER BY t.name COLLATE NOCASE ASC`,
     )

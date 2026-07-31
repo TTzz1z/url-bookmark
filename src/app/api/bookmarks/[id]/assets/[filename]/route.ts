@@ -1,6 +1,9 @@
 import { AppError } from "@/lib/errors";
 import { apiErrorResponse } from "@/lib/api-response";
-import { getBookmarkById } from "@/services/bookmark-service";
+import {
+  DELETED_RETENTION_MS,
+  getBookmarkById,
+} from "@/services/bookmark-service";
 import { readBookmarkAsset } from "@/services/image-localization-service";
 
 export const runtime = "nodejs";
@@ -12,8 +15,11 @@ type RouteContext = {
 export async function GET(_request: Request, context: RouteContext) {
   try {
     const { id, filename } = await context.params;
-    const bookmark = await getBookmarkById(id);
-    if (!bookmark) {
+    const bookmark = await getBookmarkById(id, { includeDeleted: true });
+    const deletionExpired =
+      bookmark?.deletedAt &&
+      Date.now() - new Date(bookmark.deletedAt).getTime() > DELETED_RETENTION_MS;
+    if (!bookmark || deletionExpired) {
       throw new AppError("NOT_FOUND", undefined, 404);
     }
     const asset = readBookmarkAsset(id, filename);

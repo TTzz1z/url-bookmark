@@ -1,7 +1,7 @@
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { safeFetchHtml } from "@/services/fetch-service";
+import { safeFetchBinary, safeFetchHtml } from "@/services/fetch-service";
 
 describe("受限 HTTP 抓取", () => {
   let server: Server;
@@ -12,8 +12,30 @@ describe("受限 HTTP 抓取", () => {
     server = createServer((request, response) => {
       switch (request.url) {
         case "/article":
-          response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
-          response.end("<!doctype html><title>Local</title><p>fixture body</p>");
+          response.writeHead(200, {
+            "content-type": "text/html; charset=utf-8",
+          });
+          response.end(
+            "<!doctype html><title>Local</title><p>fixture body</p>",
+          );
+          break;
+        case "/gbk-header":
+          response.writeHead(200, { "content-type": "text/html; charset=gbk" });
+          response.end(
+            Buffer.from(
+              "3c21646f63747970652068746d6c3e3c6d65746120636861727365743d2267626b223e3c7469746c653ed6d0cec4b1eacce23c2f7469746c653e3c703eb3a3bcfbd6d0cec4b1e0c2ebd2b3c3e63c2f703e",
+              "hex",
+            ),
+          );
+          break;
+        case "/gb18030-meta":
+          response.writeHead(200, { "content-type": "text/html" });
+          response.end(
+            Buffer.from(
+              "3c21646f63747970652068746d6c3e3c6d65746120636861727365743d2267623138303330223e3c7469746c653ed6d0cec4b1eacce23c2f7469746c653e3c703eb3a3bcfbd6d0cec4b1e0c2ebd2b3c3e63c2f703e",
+              "hex",
+            ),
+          );
           break;
         case "/forbidden":
           response.writeHead(403, { "content-type": "text/html" });
@@ -26,6 +48,12 @@ describe("受限 HTTP 抓取", () => {
         case "/binary":
           response.writeHead(200, { "content-type": "application/pdf" });
           response.end("%PDF");
+          break;
+        case "/image.svg":
+          response.writeHead(200, { "content-type": "image/svg+xml" });
+          response.end(
+            '<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><rect width="10" height="10"/></svg>',
+          );
           break;
         case "/large":
           response.writeHead(200, { "content-type": "text/html" });
@@ -71,6 +99,27 @@ describe("受限 HTTP 抓取", () => {
     expect(result.statusCode).toBe(200);
     expect(result.html).toContain("fixture body");
   });
+
+  it("允许下载随后会被清洗的远程 SVG 图片", async () => {
+    const result = await safeFetchBinary(`${baseUrl}/image.svg`, {
+      timeoutMs: 1_000,
+      maxBytes: 5_000,
+      maxRedirects: 2,
+      referer: `${baseUrl}/article`,
+    });
+    expect(result.contentType).toBe("image/svg+xml");
+    expect(new TextDecoder().decode(result.body)).toContain("<svg");
+  });
+
+  it.each(["/gbk-header", "/gb18030-meta"])(
+    "按声明解码常见中文编码 %s",
+    async (route) => {
+      const result = await safeFetchHtml(`${baseUrl}${route}`);
+      expect(result.html).toContain("<title>中文标题</title>");
+      expect(result.html).toContain("常见中文编码页面");
+      expect(result.html).not.toContain("�");
+    },
+  );
 
   it.each([
     ["/forbidden", "HTTP_FORBIDDEN"],

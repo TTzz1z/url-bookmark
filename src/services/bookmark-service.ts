@@ -1,22 +1,32 @@
 import { randomUUID } from "node:crypto";
 import { AppError } from "@/lib/errors";
 import {
-  deleteBookmark as deleteBookmarkRecord,
   findBookmarkByNormalizedUrl,
   getBookmarkById,
+  hardDeleteBookmark,
   insertBookmark,
-  listBookmarks,
+  listBookmarks as listBookmarkRecords,
+  listDeletedBookmarkIdsBefore,
+  restoreBookmark as restoreBookmarkRecord,
   setBookmarkTags,
+  softDeleteBookmark,
   updateBookmarkRecord,
   type BookmarkListOptions,
   type BookmarkWithTags,
 } from "@/db/repository";
 import { extractUrl, type ExtractionResult } from "./extraction-service";
+import { appendChartsToMarkdown } from "./chart-extraction-service";
 import {
   localizeBookmarkImages,
   removeBookmarkAssets,
 } from "./image-localization-service";
 import { normalizeUrl } from "./url-security-service";
+
+/**
+ * 删除后保留多久才真正清除。这段时间内 UI 可以撤销，
+ * 过期记录在下一次列表查询时顺带清理，不依赖常驻定时器。
+ */
+export const DELETED_RETENTION_MS = 10 * 60 * 1000;
 
 export type CreateBookmarkInput = {
   url: string;
@@ -39,11 +49,22 @@ async function localizeExtractionImages(
       bookmarkId,
       result.markdownContent,
       result.finalUrl,
+      result.generatedImages ?? [],
+      result.coverImageUrl ? [result.coverImageUrl] : [],
+    );
+    const markdownContent = appendChartsToMarkdown(
+      localized.markdownContent,
+      localized.attachedCharts,
     );
     return {
       ...result,
-      markdownContent: localized.markdownContent,
-      contentLength: localized.markdownContent.length,
+      coverImageUrl: result.coverImageUrl
+        ? (localized.localizedUrlByRemote[result.coverImageUrl] ??
+          result.coverImageUrl)
+        : undefined,
+      markdownContent,
+      contentLength: markdownContent.length,
+      generatedImages: undefined,
     };
   } catch {
     return result;
@@ -54,8 +75,14 @@ export async function createBookmark(
   input: CreateBookmarkInput,
 ): Promise<BookmarkWithTags> {
   const normalized = normalizeUrl(input.url);
-  if (findBookmarkByNormalizedUrl(normalized.normalizedUrl)) {
-    throw new AppError("DUPLICATE_URL", undefined, 409);
+  const existing = findBookmarkByNormalizedUrl(normalized.normalizedUrl);
+  if (existing) {
+    if (!existing.deletedAt) {
+      throw new AppError("DUPLICATE_URL", undefined, 409);
+    }
+    // 同一网址此前被删除但仍在撤销窗口内：彻底清除旧记录，
+    // 否则 normalized_url 的唯一索引会阻止重新收藏。
+    purgeBookmark(existing.id);
   }
   const now = new Date();
   const id = randomUUID();
@@ -175,27 +202,36 @@ export async function reExtractBookmark(
     retryCount: existing.retryCount + 1,
   });
   let result = await extractUrl(existing.normalizedUrl);
-  const shouldKeepEdited =
-    existing.isContentEdited && result.status !== "success";
-  if (!shouldKeepEdited) {
+  const shouldKeepExistingContent =
+    result.status === "failed" ||
+    (existing.isContentEdited && result.status !== "success");
+  if (!shouldKeepExistingContent) {
     result = await localizeExtractionImages(id, result);
   }
   updateBookmarkRecord(id, {
     finalUrl: result.finalUrl,
-    title: result.title || existing.title,
+    title:
+      result.status === "success" && result.title
+        ? result.title
+        : existing.title,
     domain: result.domain || existing.domain,
     description: result.description ?? existing.description,
     author: result.author ?? existing.author,
     faviconUrl: result.faviconUrl ?? existing.faviconUrl,
-    coverImageUrl: result.coverImageUrl ?? existing.coverImageUrl,
-    markdownContent: shouldKeepEdited
+    coverImageUrl:
+      result.status === "success"
+        ? (result.coverImageUrl ?? null)
+        : (result.coverImageUrl ?? existing.coverImageUrl),
+    markdownContent: shouldKeepExistingContent
       ? existing.markdownContent
       : result.markdownContent,
-    plainText: shouldKeepEdited ? existing.plainText : result.plainText,
-    contentLength: shouldKeepEdited
+    plainText: shouldKeepExistingContent
+      ? existing.plainText
+      : result.plainText,
+    contentLength: shouldKeepExistingContent
       ? existing.contentLength
       : result.contentLength,
-    isContentEdited: shouldKeepEdited,
+    isContentEdited: shouldKeepExistingContent && existing.isContentEdited,
     extractionStatus: result.status,
     errorCode: result.errorCode ?? null,
     errorMessage: result.errorMessage ?? null,
@@ -209,16 +245,52 @@ export async function reExtractBookmark(
   return updated;
 }
 
+/**
+ * 标记删除。正文、标签关联与本地图片都会保留到撤销窗口结束，
+ * 因此这里不能清理磁盘资源。
+ */
 export function deleteBookmark(id: string): boolean {
-  const deleted = deleteBookmarkRecord(id);
-  if (deleted) {
-    removeBookmarkAssets(id);
-  }
-  return deleted;
+  return softDeleteBookmark(id);
 }
 
-export {
-  getBookmarkById,
-  listBookmarks,
-  type BookmarkListOptions,
-};
+export async function restoreBookmark(
+  id: string,
+): Promise<BookmarkWithTags | null> {
+  if (!restoreBookmarkRecord(id)) {
+    return null;
+  }
+  return getBookmarkById(id);
+}
+
+export function purgeBookmark(id: string): boolean {
+  const purged = hardDeleteBookmark(id);
+  if (purged) {
+    removeBookmarkAssets(id);
+  }
+  return purged;
+}
+
+export function purgeExpiredBookmarks(
+  now: Date = new Date(),
+  retentionMs: number = DELETED_RETENTION_MS,
+): number {
+  const expiredIds = listDeletedBookmarkIdsBefore(
+    new Date(now.getTime() - retentionMs),
+  );
+  let purged = 0;
+  for (const expiredId of expiredIds) {
+    if (purgeBookmark(expiredId)) {
+      purged += 1;
+    }
+  }
+  return purged;
+}
+
+export async function listBookmarks(
+  options: BookmarkListOptions = {},
+): Promise<{ items: BookmarkWithTags[]; total: number }> {
+  purgeExpiredBookmarks();
+  return listBookmarkRecords(options);
+}
+
+export { getBookmarkById, type BookmarkListOptions };

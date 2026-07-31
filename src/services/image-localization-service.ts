@@ -1,23 +1,43 @@
 import fs from "node:fs";
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
+import createDOMPurify from "dompurify";
+import { JSDOM } from "jsdom";
+import type { Image as MarkdownImage } from "mdast";
+import remarkParse from "remark-parse";
+import { unified } from "unified";
+import { visit } from "unist-util-visit";
 import { resolveDatabasePath } from "@/db/client";
+import { AppError } from "@/lib/errors";
 import { safeFetchBinary } from "./fetch-service";
 
 const MAX_IMAGES_PER_BOOKMARK = 60;
 const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
 const MAX_TOTAL_IMAGE_BYTES = 50 * 1024 * 1024;
 const IMAGE_DOWNLOAD_WORKERS = 4;
-const ASSET_FILENAME_PATTERN =
-  /^[a-f0-9]{24}\.(?:png|jpg|gif|webp|avif)$/;
+const IMAGE_DOWNLOAD_ATTEMPTS = 3;
+const IMAGE_DOWNLOAD_TIMEOUT_MS = 25_000;
+const ASSET_FILENAME_PATTERN = /^[a-f0-9]{24}\.(?:png|jpg|gif|webp|avif|svg)$/;
 const BOOKMARK_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
-const remoteImagePattern = /!\[([^\]]*)\]\((https?:\/\/[^)\s]+)\)/gi;
+
+export type GeneratedBookmarkImage = {
+  title: string;
+  contentType: string;
+  body: Uint8Array;
+  placeholder?: string;
+};
 
 export type LocalizedImageResult = {
   markdownContent: string;
   localizedCount: number;
   failedCount: number;
   totalBytes: number;
+  attachedCharts: Array<{
+    title: string;
+    localUrl: string;
+    placeholder?: string;
+  }>;
+  localizedUrlByRemote: Record<string, string>;
 };
 
 export type BookmarkAsset = {
@@ -34,19 +54,16 @@ function assertBookmarkId(bookmarkId: string): void {
 
 export function resolveAssetsRoot(): string {
   const databasePath = resolveDatabasePath();
-  const databaseName = path.basename(
-    databasePath,
-    path.extname(databasePath),
-  );
+  const databaseName = path.basename(databasePath, path.extname(databasePath));
   return path.join(
-    path.dirname(databasePath),
+    /* turbopackIgnore: true */ path.dirname(databasePath),
     databaseName === "bookmarks" ? "assets" : `${databaseName}.assets`,
   );
 }
 
 export function resolveBookmarkAssetDirectory(bookmarkId: string): string {
   assertBookmarkId(bookmarkId);
-  return path.join(resolveAssetsRoot(), bookmarkId);
+  return path.join(/* turbopackIgnore: true */ resolveAssetsRoot(), bookmarkId);
 }
 
 function assetContentType(filename: string): string {
@@ -57,6 +74,7 @@ function assetContentType(filename: string): string {
     ".gif": "image/gif",
     ".webp": "image/webp",
     ".avif": "image/avif",
+    ".svg": "image/svg+xml",
   };
   const contentType = contentTypes[extension];
   if (!contentType) {
@@ -113,13 +131,174 @@ function detectImageExtension(body: Uint8Array): string | null {
   ) {
     return "avif";
   }
+  const head = new TextDecoder("utf8", { fatal: false })
+    .decode(body.subarray(0, Math.min(body.length, 256)))
+    .trimStart()
+    .toLocaleLowerCase();
+  if (head.startsWith("<svg") || head.startsWith("<?xml")) {
+    return "svg";
+  }
   return null;
 }
 
 function expectedExtension(contentType: string): string {
-  return contentType === "image/jpeg"
-    ? "jpg"
-    : contentType.replace(/^image\//, "");
+  if (contentType === "image/jpeg") {
+    return "jpg";
+  }
+  if (contentType === "image/svg+xml") {
+    return "svg";
+  }
+  return contentType.replace(/^image\//, "");
+}
+
+type MarkdownImageReference = {
+  alt: string;
+  title: string | null;
+  url: string;
+  start: number;
+  end: number;
+};
+
+function markdownImageReferences(markdown: string): MarkdownImageReference[] {
+  try {
+    const tree = unified().use(remarkParse).parse(markdown);
+    const references: MarkdownImageReference[] = [];
+    visit(tree, "image", (node: MarkdownImage) => {
+      const start = node.position?.start.offset;
+      const end = node.position?.end.offset;
+      if (
+        typeof start === "number" &&
+        typeof end === "number" &&
+        /^https?:\/\//i.test(node.url)
+      ) {
+        references.push({
+          alt: node.alt ?? "",
+          title: node.title ?? null,
+          url: node.url,
+          start,
+          end,
+        });
+      }
+    });
+    return references;
+  } catch {
+    return [];
+  }
+}
+
+function escapeMarkdownLabel(value: string): string {
+  return value.replace(/([\\\[\]])/g, "\\$1");
+}
+
+function replaceLocalizedMarkdownImages(
+  markdown: string,
+  references: MarkdownImageReference[],
+  localizedUrlByRemote: Map<string, string>,
+): string {
+  let next = markdown;
+  for (const reference of [...references].sort(
+    (left, right) => right.start - left.start,
+  )) {
+    const localizedUrl = localizedUrlByRemote.get(reference.url);
+    if (!localizedUrl) {
+      continue;
+    }
+    const title = reference.title
+      ? ` "${reference.title.replace(/["\\]/g, "\\$&")}"`
+      : "";
+    const replacement = `![${escapeMarkdownLabel(reference.alt)}](${localizedUrl}${title})`;
+    next = `${next.slice(0, reference.start)}${replacement}${next.slice(reference.end)}`;
+  }
+  return next;
+}
+
+function isRetryableImageError(error: unknown): boolean {
+  if (error instanceof TypeError) {
+    return true;
+  }
+  return (
+    error instanceof AppError &&
+    [
+      "REQUEST_TIMEOUT",
+      "HTTP_FORBIDDEN",
+      "HTTP_SERVER_ERROR",
+      "UNKNOWN_ERROR",
+    ].includes(error.code)
+  );
+}
+
+async function waitBeforeImageRetry(attempt: number): Promise<void> {
+  const delayMs =
+    process.env.NODE_ENV === "test" ? 1 : attempt === 1 ? 250 : 750;
+  await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
+}
+
+async function fetchRemoteImage(remoteUrl: string, sourceUrl: string) {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= IMAGE_DOWNLOAD_ATTEMPTS; attempt += 1) {
+    try {
+      return await safeFetchBinary(remoteUrl, {
+        timeoutMs: IMAGE_DOWNLOAD_TIMEOUT_MS,
+        maxBytes: MAX_IMAGE_BYTES,
+        maxRedirects: 5,
+        referer: sourceUrl,
+      });
+    } catch (error) {
+      lastError = error;
+      if (
+        attempt === IMAGE_DOWNLOAD_ATTEMPTS ||
+        !isRetryableImageError(error)
+      ) {
+        break;
+      }
+      await waitBeforeImageRetry(attempt);
+    }
+  }
+  throw lastError;
+}
+
+function sanitizeRemoteSvg(body: Uint8Array): Uint8Array | null {
+  try {
+    const raw = new TextDecoder("utf8", { fatal: true }).decode(body);
+    const dom = new JSDOM("", { contentType: "text/html" });
+    const purifier = createDOMPurify(
+      dom.window as unknown as Window & typeof globalThis,
+    );
+    const sanitized = purifier.sanitize(raw, {
+      USE_PROFILES: { svg: true, svgFilters: true },
+      FORBID_TAGS: [
+        "script",
+        "foreignObject",
+        "iframe",
+        "object",
+        "embed",
+        "audio",
+        "video",
+      ],
+      ALLOW_UNKNOWN_PROTOCOLS: false,
+    }) as string;
+    const svgDom = new JSDOM(sanitized, { contentType: "image/svg+xml" });
+    const root = svgDom.window.document.documentElement;
+    if (root.localName !== "svg") {
+      return null;
+    }
+    for (const element of root.querySelectorAll<SVGElement>("*")) {
+      for (const attributeName of ["href", "xlink:href"]) {
+        const value = element.getAttribute(attributeName)?.trim();
+        if (value && !value.startsWith("#")) {
+          element.removeAttribute(attributeName);
+        }
+      }
+      const style = element.getAttribute("style");
+      if (style && /(?:url\s*\(|@import)/i.test(style)) {
+        element.removeAttribute("style");
+      }
+    }
+    const result = root.outerHTML;
+    return result.length >= 40 ? new TextEncoder().encode(result) : null;
+  } catch {
+    return null;
+  }
 }
 
 async function replaceAssetDirectory(
@@ -156,12 +335,37 @@ export async function localizeBookmarkImages(
   bookmarkId: string,
   markdownContent: string,
   sourceUrl: string,
+  generatedImages: GeneratedBookmarkImage[] = [],
+  additionalImageUrls: string[] = [],
 ): Promise<LocalizedImageResult> {
   assertBookmarkId(bookmarkId);
-  const matches = Array.from(markdownContent.matchAll(remoteImagePattern));
-  const uniqueUrls = Array.from(
-    new Set(matches.map((match) => match[2])),
-  ).slice(0, MAX_IMAGES_PER_BOOKMARK);
+  const references = markdownImageReferences(markdownContent);
+  const allUniqueUrls = Array.from(
+    new Set([
+      ...additionalImageUrls.filter((url) => /^https?:\/\//i.test(url)),
+      ...references.map((reference) => reference.url),
+    ]),
+  );
+  const uniqueUrls = Array.from(allUniqueUrls).slice(
+    0,
+    MAX_IMAGES_PER_BOOKMARK,
+  );
+
+  if (uniqueUrls.length === 0 && generatedImages.length === 0) {
+    await fs.promises.rm(resolveBookmarkAssetDirectory(bookmarkId), {
+      recursive: true,
+      force: true,
+    });
+    return {
+      markdownContent,
+      localizedCount: 0,
+      failedCount: 0,
+      totalBytes: 0,
+      attachedCharts: [],
+      localizedUrlByRemote: {},
+    };
+  }
+
   const assetsRoot = resolveAssetsRoot();
   await fs.promises.mkdir(assetsRoot, { recursive: true });
   const stagingDirectory = path.join(
@@ -171,12 +375,13 @@ export async function localizeBookmarkImages(
   await fs.promises.mkdir(stagingDirectory, { recursive: true });
 
   const localizedUrlByRemote = new Map<string, string>();
+  const attachedCharts: Array<{
+    title: string;
+    localUrl: string;
+    placeholder?: string;
+  }> = [];
   let nextIndex = 0;
-  let failedCount = Math.max(
-    0,
-    new Set(matches.map((match) => match[2])).size -
-      MAX_IMAGES_PER_BOOKMARK,
-  );
+  let failedCount = Math.max(0, allUniqueUrls.length - MAX_IMAGES_PER_BOOKMARK);
   let totalBytes = 0;
 
   const worker = async () => {
@@ -188,23 +393,25 @@ export async function localizeBookmarkImages(
         return;
       }
       try {
-        const fetched = await safeFetchBinary(remoteUrl, {
-          timeoutMs: 15_000,
-          maxBytes: MAX_IMAGE_BYTES,
-          maxRedirects: 5,
-          referer: sourceUrl,
-        });
-        const extension = detectImageExtension(fetched.body);
+        const fetched = await fetchRemoteImage(remoteUrl, sourceUrl);
+        const archivedBody =
+          fetched.contentType === "image/svg+xml"
+            ? sanitizeRemoteSvg(fetched.body)
+            : fetched.body;
+        if (!archivedBody) {
+          throw new Error("Unsafe or malformed SVG image");
+        }
+        const extension = detectImageExtension(archivedBody);
         if (
           !extension ||
           extension !== expectedExtension(fetched.contentType)
         ) {
           throw new Error("Image signature does not match content type");
         }
-        if (totalBytes + fetched.body.byteLength > MAX_TOTAL_IMAGE_BYTES) {
+        if (totalBytes + archivedBody.byteLength > MAX_TOTAL_IMAGE_BYTES) {
           throw new Error("Bookmark image archive exceeds total size limit");
         }
-        totalBytes += fetched.body.byteLength;
+        totalBytes += archivedBody.byteLength;
         const hash = createHash("sha256")
           .update(remoteUrl)
           .digest("hex")
@@ -212,7 +419,7 @@ export async function localizeBookmarkImages(
         const filename = `${hash}.${extension}`;
         await fs.promises.writeFile(
           path.join(stagingDirectory, filename),
-          fetched.body,
+          archivedBody,
         );
         localizedUrlByRemote.set(
           remoteUrl,
@@ -228,11 +435,40 @@ export async function localizeBookmarkImages(
     await Promise.all(
       Array.from(
         {
-          length: Math.min(IMAGE_DOWNLOAD_WORKERS, uniqueUrls.length),
+          length: Math.min(IMAGE_DOWNLOAD_WORKERS, uniqueUrls.length || 1),
         },
         () => worker(),
       ),
     );
+
+    for (const [index, image] of generatedImages.entries()) {
+      const extension = detectImageExtension(image.body);
+      if (!extension) {
+        failedCount += 1;
+        continue;
+      }
+      if (totalBytes + image.body.byteLength > MAX_TOTAL_IMAGE_BYTES) {
+        failedCount += 1;
+        continue;
+      }
+      totalBytes += image.body.byteLength;
+      const hash = createHash("sha256")
+        .update(image.body)
+        .update(`\0${image.title}\0${index}`)
+        .digest("hex")
+        .slice(0, 24);
+      const filename = `${hash}.${extension}`;
+      await fs.promises.writeFile(
+        path.join(stagingDirectory, filename),
+        image.body,
+      );
+      attachedCharts.push({
+        title: image.title,
+        localUrl: `/api/bookmarks/${bookmarkId}/assets/${filename}`,
+        placeholder: image.placeholder,
+      });
+    }
+
     await replaceAssetDirectory(bookmarkId, stagingDirectory);
   } catch (error) {
     await fs.promises.rm(stagingDirectory, {
@@ -243,16 +479,16 @@ export async function localizeBookmarkImages(
   }
 
   return {
-    markdownContent: markdownContent.replace(
-      remoteImagePattern,
-      (original, alt: string, remoteUrl: string) => {
-        const localizedUrl = localizedUrlByRemote.get(remoteUrl);
-        return localizedUrl ? `![${alt}](${localizedUrl})` : original;
-      },
+    markdownContent: replaceLocalizedMarkdownImages(
+      markdownContent,
+      references,
+      localizedUrlByRemote,
     ),
-    localizedCount: localizedUrlByRemote.size,
+    localizedCount: localizedUrlByRemote.size + attachedCharts.length,
     failedCount,
     totalBytes,
+    attachedCharts,
+    localizedUrlByRemote: Object.fromEntries(localizedUrlByRemote),
   };
 }
 
@@ -278,7 +514,7 @@ export function readBookmarkAsset(
     return {
       filename,
       contentType: assetContentType(filename),
-      body: new Uint8Array(fs.readFileSync(target)),
+      body: new Uint8Array(fs.readFileSync(/* turbopackIgnore: true */ target)),
     };
   } catch {
     return null;
@@ -287,11 +523,11 @@ export function readBookmarkAsset(
 
 export function listBookmarkAssets(bookmarkId: string): BookmarkAsset[] {
   const directory = resolveBookmarkAssetDirectory(bookmarkId);
-  if (!fs.existsSync(directory)) {
+  if (!fs.existsSync(/* turbopackIgnore: true */ directory)) {
     return [];
   }
   return fs
-    .readdirSync(directory)
+    .readdirSync(/* turbopackIgnore: true */ directory)
     .filter((filename) => ASSET_FILENAME_PATTERN.test(filename))
     .sort()
     .flatMap((filename) => {
@@ -303,7 +539,7 @@ export function listBookmarkAssets(bookmarkId: string): BookmarkAsset[] {
 export function localizedAssetReferencePattern(bookmarkId: string): RegExp {
   assertBookmarkId(bookmarkId);
   return new RegExp(
-    `/api/bookmarks/${bookmarkId}/assets/([a-f0-9]{24}\\.(?:png|jpg|gif|webp|avif))`,
+    `/api/bookmarks/${bookmarkId}/assets/([a-f0-9]{24}\\.(?:png|jpg|gif|webp|avif|svg))`,
     "g",
   );
 }
