@@ -1,6 +1,10 @@
 node_modules/
 .next/
+.next-e2e/
+.next-portable/
 out/
+release/
+.release/
 coverage/
 playwright-report/
 test-results/
@@ -16,7 +20,10 @@ data/*.db-wal
 data/*.db-journal
 data/assets/
 data/*.assets/
+data-phase6/
+backups-phase6/
 *.tsbuildinfo
 npm-debug.log*
+*.log
 .DS_Store
 Thumbs.db
