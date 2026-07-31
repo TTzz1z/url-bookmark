@@ -4,9 +4,31 @@
 安全检查、网页抓取、正文提取、HTML 清理与 Markdown 转换，并写入本地 SQLite。
 支持标签、搜索、编辑、重新提取、软删除恢复、图文导出与重启后持久化。
 
+## 界面预览
+
+首页（演示数据）：
+
 ![首页](demo/screenshots/home.png)
 
+详情阅读模式：
+
 ![详情阅读模式](demo/screenshots/detail.png)
+
+正文关键词搜索：
+
+![搜索](demo/screenshots/search.png)
+
+Markdown 源码：
+
+![Markdown 源码](demo/screenshots/markdown.png)
+
+按标签筛选：
+
+![标签筛选](demo/screenshots/tag-filter.png)
+
+提取失败仍保留记录：
+
+![提取失败](demo/screenshots/failed.png)
 
 ## 功能概览
 
