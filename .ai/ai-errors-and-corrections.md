@@ -19,3 +19,8 @@
 | 被拒绝的 Markdown 图片协议被转换为空 `src`，React 记录控制台错误 | XSS E2E 的 console 监听捕获两条空 `src` 错误 | URL transform 对危险图片返回 `undefined`，保留无可执行地址的降级节点 | XSS DOM 断言通过且浏览器错误数组为空 |
 | 手改正文的覆盖确认先请求服务端 409，虽被 UI 处理仍产生浏览器资源错误 | 核心 E2E console 监听捕获预期 409 | 客户端依据已加载的 `isContentEdited` 直接打开确认框；服务端 409 继续作为绕过 UI 的防线 | 核心 E2E 无控制台错误，服务层拒绝测试仍通过 |
 | Node 26 全新目录执行普通安装时 `better-sqlite3` 不必要地回退到 `node-gyp`，缺少 C++ 工具链导致失败 | 临时干净目录真实运行 `setup.bat` | 增加项目 `.npmrc` 的 `ignore-scripts=true`，使用锁定依赖自带的平台二进制 | 全新目录安装 555 个包，原生模块加载、迁移、类型检查和生产构建通过 |
+| OpenAI 等站点 Undici 抓取返回 403，系统 curl 可成功 | 真实公网 URL 对照实验 | 浏览器风格请求头；401/403/429/503 时对已审查公网 IP 使用 curl + DNS pinning 回退 | 目标文章可提取；私网/SSRF 测试仍拦截 |
+| Vega-Lite 图表未进入正文，或栅格化后标签叠字、宽度塌缩 | 真实 OpenAI 文章阅读模式与截图 | 从 HTML 提取 spec；规范化 container 宽度与主题色；先加载 canvas 再渲染 PNG 并归档 | 图表单元测试与重提取后阅读模式可见本地图 |
+| Windows 原生 `canvas` / file: junction 被 standalone 掏空 | 生产构建与再次打包失败 | `@napi-rs/canvas` + 固定 tarball shim；打包脚本构建前后校验 | 重复 `package:portable` 可完成 |
+| 便携包 `/api/storage` 500：css-tree 缺 `patch.json` | 仓库外解压验收脚本 | 完整复制 `css-tree`/`mdn-data` 并强制校验；tracing includes 兜底 | `verify:portable` storage/bookmarks/空库通过 |
+| Next standalone 曾把真实 `data/bookmarks.db` 追踪进组装目录 | 打包安全闸门拦截 | `data/**` 排除、turbopackIgnore、组装后只允许 `.keep` | ZIP 与外部解压包无用户数据库 |
