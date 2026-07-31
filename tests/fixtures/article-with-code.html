@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <title>Fetch API engineering notes</title>
+  </head>
+  <body>
+    <article>
+      <h1>Fetch API engineering notes</h1>
+      <p>
+        Fetch requests should use an abort signal, a manual redirect policy, and
+        explicit response limits. These controls keep failure behavior predictable
+        and prevent a remote server from consuming unbounded time or memory.
+      </p>
+      <p>
+        The following example demonstrates a small request helper. It includes a
+        timeout and checks the response before reading the body.
+      </p>
+      <pre><code class="language-ts">const controller = new AbortController();
+const response = await fetch(url, {
+  redirect: "manual",
+  signal: controller.signal,
+});
+if (!response.ok) throw new Error("Request failed");</code></pre>
+      <p>
+        Production code should also validate DNS results, inspect every redirect,
+        reject non-HTML content, and stream the response through a byte counter.
+      </p>
+      <p>
+        Tests can provide a local HTTP server with deterministic status codes and
+        delayed responses, while production continues to reject loopback targets.
+      </p>
+      <p>
+        Keeping these responsibilities separate makes both review and maintenance
+        much easier as extraction behavior evolves over time.
+      </p>
+    </article>
+  </body>
+</html>

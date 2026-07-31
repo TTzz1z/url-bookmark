@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head><title>懒加载图片处理指南</title></head>
+  <body>
+    <article>
+      <h1>懒加载图片处理指南</h1>
+      <p>
+        许多网站不会直接把图片地址写入标准的 src 属性，而是等待浏览器脚本运行
+        后才从 data-src 或 data-original 中读取。普通 HTTP 抓取不会执行脚本，
+        因此正文处理需要主动识别这些常见属性。
+      </p>
+      <img data-src="/assets/pipeline.png" alt="正文处理流程" />
+      <p>
+        在交给阅读算法之前，将有效的懒加载地址复制到 src，并使用最终响应网址
+        作为基准转换成绝对地址。这样 Markdown 中的图片链接不会因为相对路径而
+        丢失，同时仍然不需要下载或归档远程图片。
+      </p>
+      <p>
+        图片协议必须限制为 HTTP 或 HTTPS。数据地址、脚本协议和无法解析的链接
+        应被清除，避免不可信内容通过渲染链路进入界面。
+      </p>
+      <p>
+        最后的 Markdown 只保留可读替代文本和经过检查的绝对图片地址，阅读器
+        也不会开启原始 HTML 渲染。
+      </p>
+    </article>
+  </body>
+</html>

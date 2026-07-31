@@ -1,0 +1,17 @@
+<!doctype html>
+<html>
+  <head><title>畸形但可恢复的文章</title></head>
+  <body>
+    <article>
+      <h1>畸形但可恢复的文章
+      <p>即使标签没有正确闭合，解析器也应该尽量恢复可阅读的文档结构。
+      <p>正文提取服务不能因为单个异常节点导致整个应用崩溃，失败时需要返回明确状态。
+      <ul><li>保留标题<li>保留正文<li>记录错误并允许重试</ul>
+      <p>浏览器兼容的 HTML 解析器会修复常见结构问题，再交给正文算法处理。
+      <p>清理过程继续移除脚本、事件属性、嵌入对象和危险协议，避免不可信内容进入界面。
+      <p>最后将安全正文转换为 Markdown 并保存到 SQLite，供用户后续查看和编辑。
+      <script>alert("unsafe")</script>
+      <a href="javascript:alert(1)">危险链接</a>
+    </article>
+  </body>
+</html>

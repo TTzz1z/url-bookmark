@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Designing a resilient content pipeline</title>
+  </head>
+  <body>
+    <nav>Home Documentation Pricing About Contact</nav>
+    <div class="layout">
+      <aside>
+        <h2>Popular links</h2>
+        <ul>
+          <li>Unrelated recommendation one</li>
+          <li>Unrelated recommendation two</li>
+          <li>Unrelated recommendation three</li>
+        </ul>
+      </aside>
+      <main>
+        <article>
+          <h1>Designing a resilient content pipeline</h1>
+          <p>
+            A content pipeline should make every boundary explicit. It validates
+            the source, limits network work, records the final address, and keeps
+            failures visible instead of silently discarding useful bookmarks.
+          </p>
+          <p>
+            Extraction is only one stage. The document must also be cleaned,
+            normalized, converted to a portable format, and stored in a database
+            that survives browser and application restarts without extra services.
+          </p>
+          <h2>Prefer deterministic behavior</h2>
+          <p>
+            Deterministic fixtures make extraction tests repeatable. They cover
+            headings, paragraphs, links, images, tables, quotations, and code
+            without depending on an external website that may change overnight.
+          </p>
+          <p>
+            Security checks belong before every request and after every redirect.
+            Resolving a host name is not enough unless each returned address is
+            verified and the request is pinned to a reviewed destination.
+          </p>
+          <p>
+            Finally, a useful product connects these safeguards to understandable
+            interface states so a reader can recover, edit content, or retry.
+          </p>
+        </article>
+      </main>
+    </div>
+    <footer>Newsletter signup and unrelated navigation</footer>
+  </body>
+</html>
