@@ -8,16 +8,63 @@ import {
   CaretUp,
   CaretDown,
   HardDrive,
-  House,
   List,
   Plus,
   SidebarSimple,
   Tag,
-  Trash,
   X,
 } from "@phosphor-icons/react";
-import { useState, type ReactNode } from "react";
-import type { TagDto } from "@/types/api";
+import { useEffect, useRef, useState, type ReactNode } from "react";
+import { ThemeToggle } from "./theme-toggle";
+import { tagDotIndex } from "@/lib/tag-color";
+import type { StorageUsageDto, TagDto } from "@/types/api";
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  const units = ["KB", "MB", "GB"];
+  let value = bytes / 1024;
+  let unitIndex = 0;
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024;
+    unitIndex += 1;
+  }
+  return `${value >= 10 ? Math.round(value) : value.toFixed(1)} ${units[unitIndex]}`;
+}
+
+function StorageCard() {
+  const [usage, setUsage] = useState<StorageUsageDto | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    void fetch("/api/storage", { cache: "no-store" })
+      .then((response) => (response.ok ? response.json() : null))
+      .then((data: StorageUsageDto | null) => {
+        if (active && data) setUsage(data);
+      })
+      .catch(() => undefined);
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  return (
+    <div className="storage-card">
+      <div className="storage-title">
+        <HardDrive size={17} aria-hidden="true" />
+        <span>本地数据</span>
+        {usage && <strong>{formatBytes(usage.totalBytes)}</strong>}
+      </div>
+      {usage ? (
+        <p>
+          数据库 {formatBytes(usage.databaseBytes)} · 图片{" "}
+          {formatBytes(usage.assetBytes)}
+        </p>
+      ) : (
+        <p>SQLite · data/bookmarks.db</p>
+      )}
+    </div>
+  );
+}
 
 type AppShellProps = {
   children: ReactNode;
@@ -25,6 +72,7 @@ type AppShellProps = {
   total?: number;
   selectedTag?: string;
   onSelectTag?: (tagId: string) => void;
+  onManageTags?: () => void;
   backHref?: string;
   backLabel?: string;
   activeNav?: "home" | "collections";
@@ -35,33 +83,34 @@ function NavigationContent({
   total = 0,
   selectedTag = "",
   onSelectTag,
+  onManageTags,
   closeMobile,
-  activeNav = "home",
+  activeNav = "collections",
 }: Omit<AppShellProps, "children"> & { closeMobile?: () => void }) {
   const [showAllTags, setShowAllTags] = useState(false);
   const chooseTag = (tagId: string) => {
     onSelectTag?.(tagId);
     closeMobile?.();
   };
+  const openTagManager = () => {
+    onManageTags?.();
+    closeMobile?.();
+  };
 
   return (
     <>
-      <Link className="sidebar-add-button" href="/#add-bookmark" onClick={closeMobile}>
+      <Link
+        className="sidebar-add-button"
+        href="/#add-bookmark"
+        onClick={closeMobile}
+      >
         <Plus size={18} weight="bold" aria-hidden="true" />
         添加网址
       </Link>
 
       <nav className="sidebar-nav" aria-label="主导航">
         <Link
-          className={`sidebar-link ${activeNav === "home" ? "is-active" : ""}`}
-          href="/"
-          onClick={closeMobile}
-        >
-          <House size={18} aria-hidden="true" />
-          <span>首页</span>
-        </Link>
-        <Link
-          className={`sidebar-link ${activeNav === "collections" ? "is-active" : ""}`}
+          className={`sidebar-link ${activeNav === "collections" || activeNav === "home" ? "is-active" : ""}`}
           href="/"
           onClick={closeMobile}
         >
@@ -69,36 +118,52 @@ function NavigationContent({
           <span>全部收藏</span>
           <span className="sidebar-count">{total}</span>
         </Link>
-        <a className="sidebar-link" href="#tag-filter" onClick={closeMobile}>
-          <Tag size={18} aria-hidden="true" />
-          <span>标签管理</span>
-          <span className="sidebar-count">{tags.length}</span>
-        </a>
-        <span className="sidebar-link is-muted" aria-disabled="true">
-          <Trash size={18} aria-hidden="true" />
-          <span>回收站</span>
-        </span>
+        {onManageTags ? (
+          <button
+            className="sidebar-link"
+            type="button"
+            onClick={openTagManager}
+          >
+            <Tag size={18} aria-hidden="true" />
+            <span>标签管理</span>
+            <span className="sidebar-count">{tags.length}</span>
+          </button>
+        ) : (
+          <Link
+            className="sidebar-link"
+            href="/?manageTags=1"
+            onClick={closeMobile}
+          >
+            <Tag size={18} aria-hidden="true" />
+            <span>标签管理</span>
+            <span className="sidebar-count">{tags.length}</span>
+          </Link>
+        )}
       </nav>
 
       <div className="sidebar-section" id="tag-filter">
         <h2>标签筛选</h2>
         <button
-          className={`sidebar-link sidebar-filter ${selectedTag === "" ? "is-active" : ""}`}
+          className={`sidebar-link sidebar-filter ${selectedTag === "" ? "is-filter-active" : ""}`}
           onClick={() => chooseTag("")}
           type="button"
+          aria-pressed={selectedTag === ""}
+          disabled={!onSelectTag}
         >
           <List size={18} aria-hidden="true" />
           <span>全部标签</span>
           <span className="sidebar-count">{total}</span>
         </button>
-        {tags.slice(0, showAllTags ? tags.length : 6).map((tagItem, index) => (
+        {tags.slice(0, showAllTags ? tags.length : 6).map((tagItem) => (
           <button
-            className={`sidebar-link sidebar-filter ${selectedTag === tagItem.id ? "is-active" : ""}`}
+            className={`sidebar-link sidebar-filter ${selectedTag === tagItem.id ? "is-filter-active" : ""} ${(tagItem.bookmarkCount ?? 0) === 0 ? "is-empty-count" : ""}`}
             key={tagItem.id}
             onClick={() => chooseTag(tagItem.id)}
             type="button"
+            aria-pressed={selectedTag === tagItem.id}
+            disabled={!onSelectTag}
           >
-            <span className={`tag-dot tag-dot-${(index % 6) + 1}`} />
+            <span className={`tag-dot tag-dot-${tagDotIndex(tagItem.name)}`} />
             <span>{tagItem.name}</span>
             <span className="sidebar-count">{tagItem.bookmarkCount ?? 0}</span>
           </button>
@@ -123,16 +188,7 @@ function NavigationContent({
         )}
       </div>
 
-      <div className="storage-card">
-        <div className="storage-title">
-          <HardDrive size={17} aria-hidden="true" />
-          本地存储
-        </div>
-        <div className="storage-meter" aria-hidden="true">
-          <span />
-        </div>
-        <p>SQLite · data/bookmarks.db</p>
-      </div>
+      <StorageCard />
     </>
   );
 }
@@ -143,11 +199,54 @@ export function AppShell({
   total,
   selectedTag,
   onSelectTag,
+  onManageTags,
   backHref,
   backLabel = "返回列表",
-  activeNav = "home",
+  activeNav = "collections",
 }: AppShellProps) {
   const [mobileOpen, setMobileOpen] = useState(false);
+  const sidebarRef = useRef<HTMLElement>(null);
+  const mobileMenuButtonRef = useRef<HTMLButtonElement>(null);
+
+  useEffect(() => {
+    if (!mobileOpen) return;
+    const sidebar = sidebarRef.current;
+    if (!sidebar) return;
+    const trigger = mobileMenuButtonRef.current;
+    const previousOverflow = document.body.style.overflow;
+    const focusableSelector =
+      'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+    const focusables = () =>
+      Array.from(sidebar.querySelectorAll<HTMLElement>(focusableSelector));
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setMobileOpen(false);
+        return;
+      }
+      if (event.key !== "Tab") return;
+      const items = focusables();
+      const first = items[0];
+      const last = items.at(-1);
+      if (!first || !last) return;
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+
+    document.body.style.overflow = "hidden";
+    window.addEventListener("keydown", handleKeyDown);
+    queueMicrotask(() => focusables()[0]?.focus());
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      window.removeEventListener("keydown", handleKeyDown);
+      trigger?.focus();
+    };
+  }, [mobileOpen]);
 
   return (
     <div className="app-frame">
@@ -166,30 +265,31 @@ export function AppShell({
             </Link>
           )}
         </div>
-        {!backHref && (
-          <div className="topbar-user">
-            <span className="user-avatar">U</span>
-            <span className="user-name">本地用户</span>
-            <CaretDown size={14} aria-hidden="true" />
-          </div>
-        )}
-        <button
-          className="mobile-menu-button"
-          type="button"
-          aria-label={mobileOpen ? "关闭导航" : "打开导航"}
-          aria-expanded={mobileOpen}
-          onClick={() => setMobileOpen((value) => !value)}
-        >
-          {mobileOpen ? <X size={22} /> : <SidebarSimple size={22} />}
-        </button>
+        <div className="topbar-right">
+          <ThemeToggle />
+          <button
+            className="mobile-menu-button"
+            ref={mobileMenuButtonRef}
+            type="button"
+            aria-label={mobileOpen ? "关闭导航" : "打开导航"}
+            aria-expanded={mobileOpen}
+            onClick={() => setMobileOpen((value) => !value)}
+          >
+            {mobileOpen ? <X size={22} /> : <SidebarSimple size={22} />}
+          </button>
+        </div>
       </header>
 
-      <aside className={`sidebar ${mobileOpen ? "is-open" : ""}`}>
+      <aside
+        className={`sidebar ${mobileOpen ? "is-open" : ""}`}
+        ref={sidebarRef}
+      >
         <NavigationContent
           tags={tags}
           total={total}
           selectedTag={selectedTag}
           onSelectTag={onSelectTag}
+          onManageTags={onManageTags}
           activeNav={activeNav}
           closeMobile={() => setMobileOpen(false)}
         />

@@ -8,7 +8,7 @@ function safeUrlTransform(url: string, key: string): string | undefined {
       return defaultUrlTransform(trimmed);
     }
     if (
-      /^\/api\/bookmarks\/[A-Za-z0-9_-]{1,128}\/assets\/[a-f0-9]{24}\.(?:png|jpg|gif|webp|avif)$/.test(
+      /^\/api\/bookmarks\/[A-Za-z0-9_-]{1,128}\/assets\/[a-f0-9]{24}\.(?:png|jpg|gif|webp|avif|svg)$/.test(
         trimmed,
       )
     ) {

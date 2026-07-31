@@ -1,7 +1,7 @@
 "use client";
 
 import { WarningCircle, X } from "@phosphor-icons/react";
-import { useEffect, useRef } from "react";
+import { useEffect, useId, useRef } from "react";
 
 type ConfirmDialogProps = {
   open: boolean;
@@ -25,6 +25,10 @@ export function ConfirmDialog({
   onCancel,
 }: ConfirmDialogProps) {
   const dialogRef = useRef<HTMLDialogElement>(null);
+  const cancelRef = useRef<HTMLButtonElement>(null);
+  const confirmedRef = useRef(false);
+  const titleId = useId();
+  const descriptionId = useId();
 
   useEffect(() => {
     const dialog = dialogRef.current;
@@ -32,7 +36,9 @@ export function ConfirmDialog({
       return;
     }
     if (open && !dialog.open) {
+      confirmedRef.current = false;
       dialog.showModal();
+      cancelRef.current?.focus();
     } else if (!open && dialog.open) {
       dialog.close();
     }
@@ -42,11 +48,19 @@ export function ConfirmDialog({
     <dialog
       className="confirm-dialog"
       ref={dialogRef}
+      aria-labelledby={titleId}
+      aria-describedby={descriptionId}
       onCancel={(event) => {
         event.preventDefault();
         onCancel();
       }}
-      onClose={onCancel}
+      onClose={() => {
+        if (confirmedRef.current) {
+          confirmedRef.current = false;
+          return;
+        }
+        onCancel();
+      }}
     >
       <button
         className="dialog-close"
@@ -59,17 +73,25 @@ export function ConfirmDialog({
       <span className={`dialog-icon ${destructive ? "is-danger" : ""}`}>
         <WarningCircle size={28} weight="fill" aria-hidden="true" />
       </span>
-      <h2>{title}</h2>
-      <p>{description}</p>
+      <h2 id={titleId}>{title}</h2>
+      <p id={descriptionId}>{description}</p>
       <div className="dialog-actions">
-        <button className="button button-secondary" type="button" onClick={onCancel}>
+        <button
+          className="button button-secondary"
+          ref={cancelRef}
+          type="button"
+          onClick={onCancel}
+        >
           取消
         </button>
         <button
           className={`button ${destructive ? "button-danger" : "button-primary"}`}
           type="button"
           disabled={busy}
-          onClick={onConfirm}
+          onClick={() => {
+            confirmedRef.current = true;
+            onConfirm();
+          }}
         >
           {busy ? "处理中…" : confirmLabel}
         </button>
